@@ -33,19 +33,19 @@ jobs:
       STRING_SESSION7: ${{ secrets.STRING_SESSION7 }}
       SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
       SPOTIFY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET }}
-      DURATION_LIMIT: ${{ secrets.DURATION_LIMIT }}
-      AUTO_LEAVING_ASSISTANT: ${{ secrets.AUTO_LEAVING_ASSISTANT }}
-      ASSISTANT_LEAVE_TIME: ${{ secrets.ASSISTANT_LEAVE_TIME }}
-      PLAYLIST_FETCH_LIMIT: ${{ secrets.PLAYLIST_FETCH_LIMIT }}
-      TG_AUDIO_FILESIZE_LIMIT: ${{ secrets.TG_AUDIO_FILESIZE_LIMIT }}
-      TG_VIDEO_FILESIZE_LIMIT: ${{ secrets.TG_VIDEO_FILESIZE_LIMIT }}
+      DURATION_LIMIT: ${{ secrets.DURATION_LIMIT || '17000' }}
+      AUTO_LEAVING_ASSISTANT: ${{ secrets.AUTO_LEAVING_ASSISTANT || 'True' }}
+      ASSISTANT_LEAVE_TIME: ${{ secrets.ASSISTANT_LEAVE_TIME || '9000' }}
+      PLAYLIST_FETCH_LIMIT: ${{ secrets.PLAYLIST_FETCH_LIMIT || '25' }}
+      TG_AUDIO_FILESIZE_LIMIT: ${{ secrets.TG_AUDIO_FILESIZE_LIMIT || '5242880000' }}
+      TG_VIDEO_FILESIZE_LIMIT: ${{ secrets.TG_VIDEO_FILESIZE_LIMIT || '5242880000' }}
       START_IMG_URL: ${{ secrets.START_IMG_URL }}
       PING_IMG_URL: ${{ secrets.PING_IMG_URL }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       SUPPORT_CHANNEL: ${{ secrets.SUPPORT_CHANNEL }}
       SUPPORT_CHAT: ${{ secrets.SUPPORT_CHAT }}
-      UPSTREAM_REPO: ${{ secrets.UPSTREAM_REPO }}
-      UPSTREAM_BRANCH: ${{ secrets.UPSTREAM_BRANCH }}
+      UPSTREAM_REPO: ${{ secrets.UPSTREAM_REPO || 'https://github.com/shfhshddhd/aniyamusic' }}
+      UPSTREAM_BRANCH: ${{ secrets.UPSTREAM_BRANCH || 'main' }}
       GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
 
     steps:

@@ -56,6 +56,7 @@ jobs:
       UPSTREAM_REPO: ${{ secrets.UPSTREAM_REPO || 'https://github.com/shfhshddhd/aniyamusic' }}
       UPSTREAM_BRANCH: ${{ secrets.UPSTREAM_BRANCH || 'main' }}
       GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+      YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
       PYTHONUNBUFFERED: "1"
       PYTHONFAULTHANDLER: "1"
 
@@ -65,10 +66,10 @@ jobs:
         with:
           ref: main
 
-      - name: Set up Python 3.10
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
           cache: pip
           cache-dependency-path: requirements.txt
 
@@ -98,6 +99,33 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install --no-cache-dir -r requirements.txt
+
+      - name: Prepare private YouTube cookies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cookie_file="ANIYAXMUSIC/assets/cookies.txt"
+          mkdir -p "$(dirname "$cookie_file")"
+          if [[ -n "${YOUTUBE_COOKIES:-}" ]]; then
+            first_line="$(printf '%s' "$YOUTUBE_COOKIES" | head -n 1)"
+            if [[ "$first_line" != "# Netscape HTTP Cookie File" && "$first_line" != "# HTTP Cookie File" ]]; then
+              echo "::error::YOUTUBE_COOKIES must contain a Netscape-format cookies.txt file."
+              exit 1
+            fi
+            printf '%s' "$YOUTUBE_COOKIES" > "$cookie_file"
+            chmod 600 "$cookie_file"
+            echo "Private YouTube cookie file prepared."
+          else
+            printf '# Netscape HTTP Cookie File\n' > "$cookie_file"
+            chmod 600 "$cookie_file"
+            echo "::warning::YOUTUBE_COOKIES secret is not set; YouTube may reject downloads that require login."
+          fi
+
+      - name: Patch legacy PyTgCalls update compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/patch_pytgcalls.py
 
       - name: Start AniyaMusic
         shell: bash

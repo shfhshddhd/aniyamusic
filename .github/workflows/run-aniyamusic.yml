@@ -1,17 +1,24 @@
-# AniyaMusic runtime worker.
-# This workflow is intentionally separate from CI/Docker validation.
-
+# AniyaMusic worker adapted to this repository's Python entry point.
 name: Run AniyaMusic
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
+  actions: write
+
+# A successor may be queued, but must never run alongside the current worker.
+concurrency:
+  group: aniyamusic-worker
+  cancel-in-progress: false
 
 jobs:
   run-bot:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 355
 
     env:
@@ -23,7 +30,7 @@ jobs:
       LOGGER_ID: ${{ secrets.LOGGER_ID }}
       OWNER_USERNAME: ${{ secrets.OWNER_USERNAME }}
       BOT_USERNAME: ${{ secrets.BOT_USERNAME }}
-      BOT_NAME: ${{ secrets.BOT_NAME }}
+      BOT_NAME: ${{ secrets.BOT_NAME || 'AniyaMusic' }}
       STRING_SESSION: ${{ secrets.STRING_SESSION }}
       STRING_SESSION2: ${{ secrets.STRING_SESSION2 }}
       STRING_SESSION3: ${{ secrets.STRING_SESSION3 }}
@@ -44,13 +51,19 @@ jobs:
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       SUPPORT_CHANNEL: ${{ secrets.SUPPORT_CHANNEL }}
       SUPPORT_CHAT: ${{ secrets.SUPPORT_CHAT }}
+      HEROKU_APP_NAME: ${{ secrets.HEROKU_APP_NAME }}
+      HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
       UPSTREAM_REPO: ${{ secrets.UPSTREAM_REPO || 'https://github.com/shfhshddhd/aniyamusic' }}
       UPSTREAM_BRANCH: ${{ secrets.UPSTREAM_BRANCH || 'main' }}
       GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+      PYTHONUNBUFFERED: "1"
+      PYTHONFAULTHANDLER: "1"
 
     steps:
       - name: Checkout AniyaMusic
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
@@ -62,30 +75,29 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            ffmpeg aria2 git curl build-essential gcc libffi-dev libssl-dev
+          sudo apt-get install -y --no-install-recommends ffmpeg aria2 git curl build-essential gcc libffi-dev libssl-dev
           ffmpeg -version | head -n 1
 
-      - name: Validate required GitHub Secrets
+      - name: Validate required secrets
         shell: bash
         run: |
           set -euo pipefail
           missing=()
           for name in API_ID API_HASH BOT_TOKEN MONGO_DB_URI OWNER_ID LOGGER_ID; do
-            if [[ -z "${!name}" ]]; then missing+=("$name"); fi
+            if [[ -z "${!name:-}" ]]; then missing+=("$name"); fi
           done
           if [[ -z "$STRING_SESSION" && -z "$STRING_SESSION2" && -z "$STRING_SESSION3" && -z "$STRING_SESSION4" && -z "$STRING_SESSION5" ]]; then
             missing+=("at least one of STRING_SESSION through STRING_SESSION5")
           fi
           if (( ${#missing[@]} > 0 )); then
-            printf 'Missing GitHub Actions secrets: %s\n' "${missing[*]}"
+            printf '::error::Missing required secrets: %s\n' "${missing[*]}"
             exit 1
           fi
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          pip install --no-cache-dir -r requirements.txt
+          python -m pip install --no-cache-dir -r requirements.txt
 
       - name: Start AniyaMusic
         shell: bash
@@ -93,46 +105,60 @@ jobs:
           set -euo pipefail
           log_file="$RUNNER_TEMP/aniyamusic.log"
           pid_file="$RUNNER_TEMP/aniyamusic.pid"
-          nohup python -u -m ANIYAXMUSIC >"$log_file" 2>&1 </dev/null &
+          : > "$log_file"
+          nohup bash start >"$log_file" 2>&1 </dev/null &
           echo "$!" > "$pid_file"
-          echo "AniyaMusic process started (PID $(cat "$pid_file"))."
+          echo "AniyaMusic started with PID $(cat "$pid_file")."
           echo "ANIYAMUSIC_LOG=$log_file" >> "$GITHUB_ENV"
           echo "ANIYAMUSIC_PID_FILE=$pid_file" >> "$GITHUB_ENV"
 
-      - name: Verify AniyaMusic ready
+      - name: Verify bot startup
         shell: bash
         run: |
           set -euo pipefail
-          for attempt in $(seq 1 60); do
+          # This project does not emit the reference workflow's startup marker.
+          # Check process survival and surface startup logs if it exits.
+          for attempt in $(seq 1 45); do
             pid="$(cat "$ANIYAMUSIC_PID_FILE")"
             if ! kill -0 "$pid" 2>/dev/null; then
-              echo "AniyaMusic exited during startup. Last log lines:"
-              tail -n 120 "$ANIYAMUSIC_LOG" || true
+              echo "::error::AniyaMusic exited during startup. Recent logs:"
+              tail -n 150 "$ANIYAMUSIC_LOG" || true
               exit 1
             fi
-            if grep -q "Assistant Started as" "$ANIYAMUSIC_LOG" && (( attempt >= 10 )); then
-              sleep 10
-              if kill -0 "$pid" 2>/dev/null; then
-                echo "AniyaMusic process and assistant startup verified."
-                exit 0
-              fi
+            if (( attempt >= 15 )); then
+              echo "AniyaMusic process remained alive through the startup check."
+              exit 0
             fi
             sleep 2
           done
-          echo "AniyaMusic did not pass startup verification within 120 seconds."
-          tail -n 120 "$ANIYAMUSIC_LOG" || true
-          exit 1
 
-      - name: Monitor AniyaMusic
+      - name: Monitor and queue successor
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
+          tail -n 0 -F "$ANIYAMUSIC_LOG" &
+          tail_pid=$!
+          trap 'kill "$tail_pid" 2>/dev/null || true' EXIT
+
+          started="$(date +%s)"
+          dispatched=false
           while true; do
             pid="$(cat "$ANIYAMUSIC_PID_FILE")"
             if ! kill -0 "$pid" 2>/dev/null; then
-              echo "AniyaMusic process stopped. Last log lines:"
-              tail -n 120 "$ANIYAMUSIC_LOG" || true
+              echo "::error::AniyaMusic process stopped. Recent logs:"
+              tail -n 150 "$ANIYAMUSIC_LOG" || true
               exit 1
+            fi
+
+            age=$(( $(date +%s) - started ))
+            # Queue the next worker at 5h35m; concurrency prevents overlap.
+            if (( age >= 20100 )) && [[ "$dispatched" == "false" ]]; then
+              echo "Queueing successor before the runner time limit."
+              gh workflow run run-aniyamusic.yml --repo "$GITHUB_REPOSITORY" --ref main
+              dispatched=true
+              echo "Successor queued; current worker remains the only active worker."
             fi
             sleep 30
           done

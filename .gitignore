@@ -35,3 +35,6 @@ node_modules/
 Thumbs.db
 .idea/
 .vscode/
+
+# Private YouTube authentication cookies (supply via GitHub Actions secret)
+ANIYAXMUSIC/assets/cookies.txt

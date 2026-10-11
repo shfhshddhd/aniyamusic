@@ -1,0 +1,52 @@
+name: AniyaMusic Controller Watchdog
+
+on:
+  workflow_run:
+    workflows: ["Run AniyaMusic"]
+    types: [completed]
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+# This lock is separate from the controller's lock; watchdog ticks never cancel it.
+concurrency:
+  group: aniyamusic-controller-watchdog
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  ensure-controller:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ensure a controller is active
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          CONTROLLER_WORKFLOW="aniyamusic-controller.yml"
+          BRANCH="main"
+
+          active_controllers="$(gh run list --repo "$REPO" --workflow "$CONTROLLER_WORKFLOW" --branch "$BRANCH" --limit 30 \
+            --json databaseId,status,createdAt,number |
+            jq '[.[] | select(
+              .status == "queued" or .status == "in_progress" or
+              .status == "waiting" or .status == "pending" or .status == "requested"
+            ) | {id: .databaseId, status: .status, created_at: .createdAt, run_number: .number}] |
+            sort_by(.created_at)')"
+
+          count="$(jq 'length' <<< "$active_controllers")"
+          echo "Active/queued AniyaMusic controllers: $count"
+          jq . <<< "$active_controllers"
+
+          if (( count == 0 )); then
+            echo "No controller found; dispatching one."
+            gh workflow run "$CONTROLLER_WORKFLOW" --repo "$REPO" --ref "$BRANCH"
+          else
+            echo "Controller already active or queued; leaving it untouched."
+          fi

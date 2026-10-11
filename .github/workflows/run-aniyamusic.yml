@@ -1,0 +1,138 @@
+# AniyaMusic runtime worker.
+# This workflow is intentionally separate from CI/Docker validation.
+
+name: Run AniyaMusic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+
+    env:
+      API_ID: ${{ secrets.API_ID }}
+      API_HASH: ${{ secrets.API_HASH }}
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      MONGO_DB_URI: ${{ secrets.MONGO_DB_URI }}
+      OWNER_ID: ${{ secrets.OWNER_ID }}
+      LOGGER_ID: ${{ secrets.LOGGER_ID }}
+      OWNER_USERNAME: ${{ secrets.OWNER_USERNAME }}
+      BOT_USERNAME: ${{ secrets.BOT_USERNAME }}
+      BOT_NAME: ${{ secrets.BOT_NAME }}
+      STRING_SESSION: ${{ secrets.STRING_SESSION }}
+      STRING_SESSION2: ${{ secrets.STRING_SESSION2 }}
+      STRING_SESSION3: ${{ secrets.STRING_SESSION3 }}
+      STRING_SESSION4: ${{ secrets.STRING_SESSION4 }}
+      STRING_SESSION5: ${{ secrets.STRING_SESSION5 }}
+      STRING_SESSION6: ${{ secrets.STRING_SESSION6 }}
+      STRING_SESSION7: ${{ secrets.STRING_SESSION7 }}
+      SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
+      SPOTIFY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET }}
+      DURATION_LIMIT: ${{ secrets.DURATION_LIMIT }}
+      AUTO_LEAVING_ASSISTANT: ${{ secrets.AUTO_LEAVING_ASSISTANT }}
+      ASSISTANT_LEAVE_TIME: ${{ secrets.ASSISTANT_LEAVE_TIME }}
+      PLAYLIST_FETCH_LIMIT: ${{ secrets.PLAYLIST_FETCH_LIMIT }}
+      TG_AUDIO_FILESIZE_LIMIT: ${{ secrets.TG_AUDIO_FILESIZE_LIMIT }}
+      TG_VIDEO_FILESIZE_LIMIT: ${{ secrets.TG_VIDEO_FILESIZE_LIMIT }}
+      START_IMG_URL: ${{ secrets.START_IMG_URL }}
+      PING_IMG_URL: ${{ secrets.PING_IMG_URL }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      SUPPORT_CHANNEL: ${{ secrets.SUPPORT_CHANNEL }}
+      SUPPORT_CHAT: ${{ secrets.SUPPORT_CHAT }}
+      UPSTREAM_REPO: ${{ secrets.UPSTREAM_REPO }}
+      UPSTREAM_BRANCH: ${{ secrets.UPSTREAM_BRANCH }}
+      GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+
+    steps:
+      - name: Checkout AniyaMusic
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg aria2 git curl build-essential gcc libffi-dev libssl-dev
+          ffmpeg -version | head -n 1
+
+      - name: Validate required GitHub Secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in API_ID API_HASH BOT_TOKEN MONGO_DB_URI OWNER_ID LOGGER_ID; do
+            if [[ -z "${!name}" ]]; then missing+=("$name"); fi
+          done
+          if [[ -z "$STRING_SESSION" && -z "$STRING_SESSION2" && -z "$STRING_SESSION3" && -z "$STRING_SESSION4" && -z "$STRING_SESSION5" ]]; then
+            missing+=("at least one of STRING_SESSION through STRING_SESSION5")
+          fi
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing GitHub Actions secrets: %s\n' "${missing[*]}"
+            exit 1
+          fi
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install --no-cache-dir -r requirements.txt
+
+      - name: Start AniyaMusic
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="$RUNNER_TEMP/aniyamusic.log"
+          pid_file="$RUNNER_TEMP/aniyamusic.pid"
+          nohup python -u -m ANIYAXMUSIC >"$log_file" 2>&1 </dev/null &
+          echo "$!" > "$pid_file"
+          echo "AniyaMusic process started (PID $(cat "$pid_file"))."
+          echo "ANIYAMUSIC_LOG=$log_file" >> "$GITHUB_ENV"
+          echo "ANIYAMUSIC_PID_FILE=$pid_file" >> "$GITHUB_ENV"
+
+      - name: Verify AniyaMusic ready
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            pid="$(cat "$ANIYAMUSIC_PID_FILE")"
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo "AniyaMusic exited during startup. Last log lines:"
+              tail -n 120 "$ANIYAMUSIC_LOG" || true
+              exit 1
+            fi
+            if grep -q "Assistant Started as" "$ANIYAMUSIC_LOG" && (( attempt >= 10 )); then
+              sleep 10
+              if kill -0 "$pid" 2>/dev/null; then
+                echo "AniyaMusic process and assistant startup verified."
+                exit 0
+              fi
+            fi
+            sleep 2
+          done
+          echo "AniyaMusic did not pass startup verification within 120 seconds."
+          tail -n 120 "$ANIYAMUSIC_LOG" || true
+          exit 1
+
+      - name: Monitor AniyaMusic
+        shell: bash
+        run: |
+          set -euo pipefail
+          while true; do
+            pid="$(cat "$ANIYAMUSIC_PID_FILE")"
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo "AniyaMusic process stopped. Last log lines:"
+              tail -n 120 "$ANIYAMUSIC_LOG" || true
+              exit 1
+            fi
+            sleep 30
+          done

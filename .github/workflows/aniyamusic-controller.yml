@@ -1,0 +1,154 @@
+name: AniyaMusic Controller
+
+on:
+  workflow_run:
+    workflows: ["Run AniyaMusic"]
+    types: [completed]
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+# Do not cancel the running controller when the 5-minute watchdog fires.
+concurrency:
+  group: aniyamusic-controller
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Watch, restart and hand over AniyaMusic
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          BOT_WORKFLOW="run-aniyamusic.yml"
+          CONTROLLER_WORKFLOW="aniyamusic-controller.yml"
+          BRANCH="main"
+          BOT_HANDOVER_MINUTES=330
+          CONTROLLER_HANDOVER_MINUTES=330
+          controller_started="$(date -u +%s)"
+          controller_handover_done=false
+
+          dispatch_bot() {
+            echo "Dispatching AniyaMusic worker on $BRANCH"
+            gh workflow run "$BOT_WORKFLOW" --repo "$REPO" --ref "$BRANCH"
+          }
+
+          dispatch_controller() {
+            if [[ "$controller_handover_done" == "true" ]]; then return; fi
+            controller_handover_done=true
+            echo "Dispatching replacement controller before timeout"
+            gh workflow run "$CONTROLLER_WORKFLOW" --repo "$REPO" --ref "$BRANCH"
+          }
+
+          active_json() {
+            gh run list \
+              --repo "$REPO" \
+              --workflow "$BOT_WORKFLOW" \
+              --branch "$BRANCH" \
+              --limit 100 \
+              --json databaseId,status,createdAt,number |
+              jq '[.[] |
+                select(
+                  .status == "queued" or
+                  .status == "in_progress" or
+                  .status == "waiting" or
+                  .status == "pending" or
+                  .status == "requested"
+                ) |
+                {
+                  id: .databaseId,
+                  status: .status,
+                  created_at: .createdAt,
+                  run_number: .number
+                }
+              ] | sort_by(.created_at)'
+          }
+
+          is_ready() {
+            local run_id="$1"
+            [[ "$run_id" =~ ^[0-9]+$ ]] || return 1
+            gh api -H "Accept: application/vnd.github+json" \
+              "/repos/$REPO/actions/runs/$run_id/jobs?per_page=100" |
+              jq -e '[.jobs[].steps[]? |
+                select(.name == "Verify AniyaMusic ready" and .conclusion == "success")
+              ] | length > 0' >/dev/null
+          }
+
+          cancel_run() {
+            local run_id="$1"
+            [[ "$run_id" =~ ^[0-9]+$ ]] || return 0
+            echo "Cancelling superseded worker run $run_id"
+            gh api --method POST -H "Accept: application/vnd.github+json" \
+              "/repos/$REPO/actions/runs/$run_id/cancel" >/dev/null || true
+          }
+
+          while true; do
+            now="$(date -u +%s)"
+            controller_age=$(( (now - controller_started) / 60 ))
+
+            if (( controller_age >= CONTROLLER_HANDOVER_MINUTES )); then
+              dispatch_controller
+              sleep 30
+              continue
+            fi
+
+            active="$(active_json)"
+            count="$(jq 'length' <<<"$active")"
+
+            if (( count == 0 )); then
+              dispatch_bot
+              # Give GitHub a moment to register the new run before checking again.
+              sleep 60
+              continue
+            fi
+
+            newest="$(jq 'last' <<<"$active")"
+            newest_id="$(jq -r '.id' <<<"$newest")"
+            newest_number="$(jq -r '.run_number' <<<"$newest")"
+            newest_created="$(jq -r '.created_at' <<<"$newest")"
+
+            if ! [[ "$newest_id" =~ ^[0-9]+$ ]]; then
+              echo "Invalid newest run id: $newest_id"
+              sleep 30
+              continue
+            fi
+
+            created="$(date -u -d "$newest_created" +%s)"
+            worker_age=$(( (now - created) / 60 ))
+            echo "Watching newest AniyaMusic run #$newest_number (id=$newest_id, status=$(jq -r '.status' <<<"$newest"), age=${worker_age}m)"
+
+            if is_ready "$newest_id"; then
+              # Start a successor once the current worker reaches the handover age.
+              if (( count == 1 && worker_age >= BOT_HANDOVER_MINUTES )); then
+                dispatch_bot
+                sleep 60
+                continue
+              fi
+
+              # Only cancel older workers after the newest worker passed its readiness check.
+              jq -r --arg target "$newest_id" \
+                '.[] | select((.id|tostring) != $target) | .id' <<<"$active" |
+              while read -r old_id; do
+                [[ -n "$old_id" ]] && cancel_run "$old_id"
+              done
+            else
+              # If a single worker has reached the handover age, launch its successor.
+              # If a successor is already queued/starting, do not dispatch duplicates.
+              if (( count == 1 && worker_age >= BOT_HANDOVER_MINUTES )); then
+                dispatch_bot
+                sleep 60
+                continue
+              fi
+            fi
+
+            sleep 30
+          done

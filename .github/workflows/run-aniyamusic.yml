@@ -56,6 +56,7 @@ jobs:
       UPSTREAM_REPO: ${{ secrets.UPSTREAM_REPO || 'https://github.com/shfhshddhd/aniyamusic' }}
       UPSTREAM_BRANCH: ${{ secrets.UPSTREAM_BRANCH || 'main' }}
       GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+      # Store the Batbin paste URL here, not the raw cookie contents.
       YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
       PYTHONUNBUFFERED: "1"
       PYTHONFAULTHANDLER: "1"
@@ -100,26 +101,94 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install --no-cache-dir -r requirements.txt
 
-      - name: Prepare private YouTube cookies
+      - name: Prepare and validate private YouTube cookies
         shell: bash
         run: |
           set -euo pipefail
-          cookie_file="ANIYAXMUSIC/assets/cookies.txt"
-          mkdir -p "$(dirname "$cookie_file")"
-          if [[ -n "${YOUTUBE_COOKIES:-}" ]]; then
-            first_line="$(printf '%s' "$YOUTUBE_COOKIES" | head -n 1)"
-            if [[ "$first_line" != "# Netscape HTTP Cookie File" && "$first_line" != "# HTTP Cookie File" ]]; then
-              echo "::error::YOUTUBE_COOKIES must contain a Netscape-format cookies.txt file."
-              exit 1
-            fi
-            printf '%s' "$YOUTUBE_COOKIES" > "$cookie_file"
-            chmod 600 "$cookie_file"
-            echo "Private YouTube cookie file prepared."
-          else
-            printf '# Netscape HTTP Cookie File\n' > "$cookie_file"
-            chmod 600 "$cookie_file"
-            echo "::warning::YOUTUBE_COOKIES secret is not set; YouTube may reject downloads that require login."
+          COOKIE_FILE="ANIYAXMUSIC/assets/cookies.txt"
+          COOKIE_TMP="$RUNNER_TEMP/youtube-cookies.download"
+          mkdir -p "$(dirname "$COOKIE_FILE")"
+          umask 077
+
+          if [[ -z "${YOUTUBE_COOKIES:-}" ]]; then
+            echo "::error::YOUTUBE_COOKIES is empty. Set it to the Batbin paste URL."
+            exit 1
           fi
+
+          # Accept only HTTPS Batbin paste URLs. Do not print the URL or response body.
+          if [[ ! "$YOUTUBE_COOKIES" =~ ^https://batbin\.me/([A-Za-z0-9_-]+)/?$ ]]; then
+            echo "::error::YOUTUBE_COOKIES must be an HTTPS Batbin paste URL, e.g. https://batbin.me/your-paste-id"
+            exit 1
+          fi
+          PASTE_ID="${BASH_REMATCH[1]}"
+          PAGE_URL="https://batbin.me/$PASTE_ID"
+          RAW_URL="https://batbin.me/raw/$PASTE_ID"
+
+          download_ok=false
+          for candidate in "$RAW_URL" "$PAGE_URL"; do
+            if curl --fail --silent --show-error --location --max-time 30 \
+                --proto '=https' --tlsv1.2 "$candidate" -o "$COOKIE_TMP" 2>/dev/null; then
+              # Some paste pages return HTML; reject those and try the raw endpoint.
+              if ! grep -Eiq '<!doctype html|<html([[:space:]>])' "$COOKIE_TMP"; then
+                download_ok=true
+                break
+              fi
+            fi
+          done
+
+          if [[ "$download_ok" != true ]]; then
+            rm -f "$COOKIE_TMP"
+            echo "::error::Could not retrieve raw text from Batbin. Check that the paste exists and its raw endpoint is accessible."
+            exit 1
+          fi
+
+          # Normalize CRLF and literal escaped newlines sometimes introduced while copying secrets.
+          python - "$COOKIE_TMP" "$COOKIE_FILE" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          source = Path(sys.argv[1])
+          destination = Path(sys.argv[2])
+          raw = source.read_bytes()
+          if b"\x00" in raw:
+              raise SystemExit("Cookie payload contains NUL bytes; refusing to use it.")
+          text = raw.decode("utf-8-sig", errors="strict")
+          text = text.replace("\r\n", "\n").replace("\r", "\n")
+          # If the paste contains literal backslash-n sequences rather than actual lines,
+          # normalize them only when the payload otherwise appears to be one long line.
+          if "\n" not in text and "\\n" in text:
+              text = text.replace("\\n", "\n")
+          lines = [line for line in text.splitlines() if line.strip()]
+          if not lines or lines[0].strip() not in {
+              "# Netscape HTTP Cookie File", "# HTTP Cookie File"
+          }:
+              raise SystemExit("Batbin content is not a Netscape cookies.txt file (header missing).")
+
+          cookie_count = 0
+          for number, line in enumerate(lines, 1):
+              stripped = line.strip()
+              if not stripped or stripped.startswith("#"):
+                  continue
+              # Netscape format has exactly seven tab-separated fields. Accept whitespace
+              # separators as a recovery path for exported files that use spaces.
+              fields = stripped.split("\t") if "\t" in stripped else re.split(r"\s+", stripped, maxsplit=6)
+              if len(fields) != 7:
+                  raise SystemExit(f"Invalid Netscape cookie row at line {number}: expected 7 fields, found {len(fields)}.")
+              domain, include_subdomains, path, secure, expiry, name, value = fields
+              if include_subdomains not in {"TRUE", "FALSE"} or secure not in {"TRUE", "FALSE"}:
+                  raise SystemExit(f"Invalid Netscape flags at line {number}.")
+              if not path.startswith("/") or not expiry.isdigit() or not name or not value:
+                  raise SystemExit(f"Invalid Netscape cookie fields at line {number}.")
+              cookie_count += 1
+
+          if cookie_count == 0:
+              raise SystemExit("Cookie file contains no cookie entries.")
+          destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          destination.chmod(0o600)
+          print(f"Validated Netscape cookie file ({cookie_count} entries); values were not logged.")
+          PY
+          rm -f "$COOKIE_TMP"
 
       - name: Patch legacy PyTgCalls update compatibility
         shell: bash

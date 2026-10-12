@@ -56,9 +56,19 @@ async def secret_upload(video_id, title, file_path):
             with open(file_path, "rb") as f:
                 data = {"reqtype": "fileupload", "userhash": ""}
                 files = {"fileToUpload": f}
-                response = requests.post(CATBOX_URL, data=data, files=files)
-                if response.status_code == 200 and "catbox.moe" in response.text:
-                    return response.text.strip()
+                response = requests.post(
+                    CATBOX_URL,
+                    data=data,
+                    files=files,
+                    timeout=(10, 90),
+                )
+                body = response.text.strip()
+                if response.status_code == 200 and "catbox.moe" in body:
+                    return body
+                print(
+                    f"❌ Catbox upload rejected: HTTP {response.status_code}; "
+                    f"response={body[:180]!r}"
+                )
         except Exception as e:
             print(f"Upload Error: {e}")
         return None

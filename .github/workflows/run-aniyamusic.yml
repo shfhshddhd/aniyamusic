@@ -80,6 +80,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends ffmpeg aria2 git curl build-essential gcc libffi-dev libssl-dev
           ffmpeg -version | head -n 1
 
+      - name: Install Deno JavaScript runtime for YouTube challenge solving
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
+          "$HOME/.deno/bin/deno" --version
+
       - name: Validate required secrets
         shell: bash
         run: |

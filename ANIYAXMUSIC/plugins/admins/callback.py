@@ -52,6 +52,28 @@ checker = {}
 upvoters = {}
 
 
+def _build_keyboard(markup):
+    """Convert Bot API-style button dictionaries to Pyrogram button objects."""
+    rows = []
+    for row in (markup or []):
+        if not isinstance(row, (list, tuple)):
+            row = [row]
+        converted = []
+        for button in row:
+            if isinstance(button, dict):
+                allowed = {
+                    "text", "callback_data", "url", "user_id",
+                    "switch_inline_query", "switch_inline_query_current_chat",
+                    "callback_game", "pay", "login_url", "web_app",
+                }
+                button = {key: value for key, value in button.items() if key in allowed}
+                converted.append(InlineKeyboardButton(**button))
+            else:
+                converted.append(button)
+        rows.append(converted)
+    return InlineKeyboardMarkup(rows)
+
+
 
 @app.on_callback_query(filters.regex("unban_assistant"))
 async def unban_assistant(_, callback: CallbackQuery):
